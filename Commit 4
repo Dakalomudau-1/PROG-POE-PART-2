@@ -1,0 +1,40 @@
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using RaceDay.Models;
+using RaceDay.NewFolder;
+
+namespace RaceDay.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class OrganisersController : ControllerBase
+    {
+        private readonly DataStore _data;
+
+        public OrganisersController(DataStore data)
+        {
+            _data = data;
+        }
+
+        [HttpGet]
+        public IActionResult GetOrganisers()
+        {
+            return Ok(_data.Organisers
+                .Select(o => new { o.OrganiserId, o.FullName, o.ProfilePictureUrl })
+            .ToList());
+        }
+
+        [HttpGet("{id}")]
+        public IActionResult GetOrganiser(int id)
+        {
+            var organiser = _data.Organisers.FirstOrDefault(o => o.OrganiserId == id);
+            if (organiser == null)
+                return NotFound(new { message = "Organiser not found" });
+
+            return Ok(new { organiser.OrganiserId,
+                organiser.FullName,
+                organiser.ProfilePictureUrl 
+            });
+        }
+    }
+}
