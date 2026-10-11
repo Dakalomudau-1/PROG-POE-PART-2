@@ -1,0 +1,242 @@
+﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using RaceDay.Models;
+using System.Text;
+using System.Security.Cryptography;
+using RaceDay.NewFolder;
+
+namespace RaceDay.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class UsersController : ControllerBase
+    {
+        private readonly DataStore _data;
+
+        public UsersController(DataStore data)
+        {
+            _data = data;
+        }
+
+        [HttpPost("~/api/auth/register")]
+        public IActionResult Register([FromBody] RegisterRequest request)
+        {
+            // Check if email exists
+            if (_data.Users.Any(u => u.Email == request.Email))
+                return Conflict(new { message = "Account already exists with this email" });
+
+            // Validate required fields
+            if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
+                return BadRequest(new { message = "Email and password are required" });
+
+
+            // Validate role
+            if (request.Role != "Organiser" && request.Role != "Participant")
+                return BadRequest(new { message = "Role must be 'Organiser' or 'Participant'" });
+
+            // Validate email format based on role
+            if (request.Role == "Organiser" && !request.Email.Contains("@organiser", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { message = "Organiser emails must contain '@organiser'" });
+
+            // Validate email format based on role
+            if (request.Role == "Participant" && !request.Email.Contains("@participant", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { message = "Participant emails must contain '@participant'" });
+
+            // Validate DateOfBirth for Participants
+            if (request.Role == "Participant" && !request.DateOfBirth.HasValue)
+                return BadRequest(new { message = "Date of birth is required for participants" });
+
+            // Hash password
+            using var sha256 = SHA256.Create();
+            var hashedBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(request.Password));
+            var passwordHash = Convert.ToBase64String(hashedBytes);
+
+            // Create User
+            var user = new User
+            {
+                UserId = _data.UserIdCounter++,
+                Email = request.Email,
+                PasswordHash = passwordHash,
+                Role = request.Role,
+                CreatedAt = DateTime.Now
+            };
+            _data.Users.Add(user);
+
+            // Create role-specific profile
+            if (request.Role == "Organiser")
+            {
+                var organiser = new Organiser
+                {
+                    OrganiserId = _data.OrganiserIdCounter++,
+                    UserId = user.UserId,
+                    FullName = request.FullName,
+                    PhoneNumber = request.PhoneNumber,
+                    User = user
+                };
+                _data.Organisers.Add(organiser);
+            }
+            else // Participant
+            {
+                var participant = new Participant
+                {
+                    ParticipantId = _data.ParticipantIdCounter++,
+                    UserId = user.UserId,
+                    FullName = request.FullName,
+                    DateOfBirth = request.DateOfBirth.Value,
+                    PhoneNumber = request.PhoneNumber,
+                    User = user
+                };
+                _data.Participants.Add(participant);
+            }
+
+            return Created(string.Empty, new
+            {
+                userId = user.UserId,
+                email = user.Email,
+                role = user.Role,
+                createdAt = user.CreatedAt
+            });
+        }
+
+        [HttpPost("~/api/auth/login")]
+        public IActionResult Login([FromBody] LoginRequest request)
+        {
+            var user = _data.Users.FirstOrDefault(u => u.Email == request.Email);
+            if (user == null)
+                return Unauthorized(new { message = "Invalid email or password" });
+
+            using var sha256 = SHA256.Create();
+            var hashedBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(request.Password));
+            var passwordHash = Convert.ToBase64String(hashedBytes);
+
+            if (user.PasswordHash != passwordHash)
+                return Unauthorized(new { message = "Invalid email or password" });
+
+            HttpContext.Session.SetInt32("UserId", user.UserId);
+            HttpContext.Session.SetString("UserRole", user.Role);
+
+            return Ok(new
+            {
+                message = "Login successful",
+                userId = user.UserId,
+                role = user.Role
+            });
+        }
+
+        [HttpPost("~/api/auth/logout")]
+        public IActionResult Logout()
+        {
+            HttpContext.Session.Clear();
+            return Ok(new { message = "Logout successful" });
+        }
+
+        [HttpGet("me")]
+        public IActionResult GetProfile()
+        {
+            var userId = HttpContext.Session.GetInt32("UserId");
+            if (!userId.HasValue)
+                return Unauthorized(new { message = "No active session" });
+
+            var user = _data.Users.FirstOrDefault(u => u.UserId == userId.Value);
+            if (user == null)
+                return NotFound(new { message = "User not found" });
+
+            if (user.Role == "Organiser")
+            {
+                var organiser = _data.Organisers.FirstOrDefault(o => o.UserId == userId.Value);
+                return Ok(new
+                {
+                    userId = user.UserId,
+                    email = user.Email,
+                    role = user.Role,
+                    fullName = organiser?.FullName,
+                    phoneNumber = organiser?.PhoneNumber,
+                    profilePictureUrl = organiser?.ProfilePictureUrl,
+                    createdAt = user.CreatedAt
+                });
+            }
+            else
+            {
+                var participant = _data.Participants.FirstOrDefault(p => p.UserId == userId.Value);
+                return Ok(new
+                {
+                    userId = user.UserId,
+                    email = user.Email,
+                    role = user.Role,
+                    fullName = participant?.FullName,
+                    dateOfBirth = participant?.DateOfBirth,
+                    phoneNumber = participant?.PhoneNumber,
+                    profilePictureUrl = participant?.ProfilePictureUrl,
+                    createdAt = user.CreatedAt
+                });
+            }
+        }
+
+        [HttpPut("me")]
+        public IActionResult UpdateProfile([FromBody] UpdateProfileRequest request)
+        {
+            var userId = HttpContext.Session.GetInt32("UserId");
+            if (!userId.HasValue)
+                return Unauthorized(new { message = "No active session" });
+
+            var user = _data.Users.FirstOrDefault(u => u.UserId == userId.Value);
+            if (user == null)
+                return NotFound(new { message = "User not found" });
+
+            if (user.Role == "Organiser")
+            {
+                var organiser = _data.Organisers.FirstOrDefault(o => o.UserId == userId.Value);
+                if (organiser != null)
+                {
+                    if (!string.IsNullOrEmpty(request.FullName))
+                        organiser.FullName = request.FullName;
+                    if (!string.IsNullOrEmpty(request.PhoneNumber))
+                        organiser.PhoneNumber = request.PhoneNumber;
+                    if (!string.IsNullOrEmpty(request.ProfilePictureUrl))
+                        organiser.ProfilePictureUrl = request.ProfilePictureUrl;
+                }
+            }
+            else // Participant
+            {
+                var participant = _data.Participants.FirstOrDefault(p => p.UserId == userId.Value);
+                if (participant != null)
+                {
+                    if (!string.IsNullOrEmpty(request.FullName))
+                        participant.FullName = request.FullName;
+                    if (request.DateOfBirth.HasValue)
+                        participant.DateOfBirth = request.DateOfBirth.Value;
+                    if (!string.IsNullOrEmpty(request.PhoneNumber))
+                        participant.PhoneNumber = request.PhoneNumber;
+                    if (!string.IsNullOrEmpty(request.ProfilePictureUrl))
+                        participant.ProfilePictureUrl = request.ProfilePictureUrl;
+                }
+            }
+
+            return Ok(new { message = "Profile updated successfully" });
+        }
+
+        public class RegisterRequest
+        {
+            public string FullName { get; set; }
+            public string Email { get; set; }
+            public string Password { get; set; }
+            public string Role { get; set; }
+            public DateTime? DateOfBirth { get; set; }
+            public string PhoneNumber { get; set; }
+        }
+
+        public class LoginRequest
+        {
+            public string Email { get; set; }
+            public string Password { get; set; }
+        }
+
+        public class UpdateProfileRequest
+        {
+            public string FullName { get; set; }
+            public DateTime? DateOfBirth { get; set; }
+            public string PhoneNumber { get; set; }
+            public string ProfilePictureUrl { get; set; }
+        }
+    }
+}

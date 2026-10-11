@@ -1,0 +1,185 @@
+﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using RaceDay.Models;
+using RaceDay.NewFolder;
+
+namespace RaceDay.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class ResultsController : ControllerBase
+    {
+        private readonly DataStore _data;
+
+        public ResultsController(DataStore data)
+        {
+            _data = data;
+        }
+
+        [HttpGet]
+        public IActionResult GetAllResults()
+        {
+            return Ok(_data.Results
+                .Select(r => new
+                {
+                    r.ResultId,
+                    r.EnrolmentId,
+                    r.FinishTime,
+                    r.FinishPosition,
+                    r.PublishedAt,
+                    Enrolment = _data.Enrolments
+                    .Where(e => e.EnrolmentId == r.EnrolmentId)
+                    .Select(e => new { e.EnrolmentId, e.ParticipantId, e.EventId, e.CategoryId, e.Status })
+                    .FirstOrDefault()
+                })
+            .ToList());
+        }
+
+        [HttpGet("{id}")]
+        public IActionResult GetResult(int id)
+        {
+            var result = _data.Results.FirstOrDefault(r => r.ResultId == id);
+            if (result == null)
+                return NotFound(new { message = "Result not found" });
+
+            return Ok(new
+            {
+                result.ResultId,
+                result.EnrolmentId,
+                result.FinishTime,
+                result.FinishPosition,
+                result.PublishedAt,
+                Enrolment = _data.Enrolments
+                .Where(e => e.EnrolmentId == result.EnrolmentId)
+                .Select(e => new { e.EnrolmentId, e.ParticipantId, e.EventId, e.CategoryId, e.Status })
+                .FirstOrDefault()
+            });
+        }
+
+        [HttpPost("~/api/enrolments/{enrolmentId}/results")]
+        public IActionResult CreateResult(int enrolmentId, [FromBody] CreateResultRequest request)
+        {
+            var userId = HttpContext.Session.GetInt32("UserId");
+            if (!userId.HasValue)
+                return Unauthorized(new { message = "You must be logged in" });
+
+            var user = _data.Users.FirstOrDefault(u => u.UserId == userId.Value);
+            if (user == null || user.Role != "Organiser")
+                return StatusCode(403, new { message = "Only organisers can capture results" });
+
+            var enrolment = _data.Enrolments.FirstOrDefault(e => e.EnrolmentId == enrolmentId);
+            if (enrolment == null)
+                return NotFound(new { message = "Enrolment not found" });
+
+            var eventItem = _data.Events.FirstOrDefault(e => e.EventId == enrolment.EventId);
+            if (eventItem == null)
+                return NotFound(new { message = "Event not found" });
+
+            var organiser = _data.Organisers.FirstOrDefault(o => o.OrganiserId == eventItem.OrganiserId);
+            if (organiser == null || organiser.UserId != userId.Value)
+                return StatusCode(403, new { message = "Only the organiser who owns this event can capture results" });
+
+            if (request.FinishTime <= TimeSpan.Zero || request.FinishPosition < 1)
+                return BadRequest(new { message = "Finish time and position must be greater than zero" });
+
+            if (_data.Results.Any(r => r.EnrolmentId == enrolmentId))
+                return Conflict(new { message = "Result already exists for this enrolment" });
+
+            var result = new Result
+            {
+                ResultId = _data.ResultIdCounter++,
+                EnrolmentId = enrolmentId,
+                FinishTime = request.FinishTime,
+                FinishPosition = request.FinishPosition,
+                PublishedAt = DateTime.Now
+            };
+
+            _data.Results.Add(result);
+
+            return Created(string.Empty, new
+            {
+                result.ResultId,
+                result.EnrolmentId,
+                result.FinishTime,
+                result.FinishPosition,
+                result.PublishedAt
+            });
+        }
+
+        [HttpGet("~/api/users/me/results")]
+        public IActionResult GetMyResults()
+        {
+            var userId = HttpContext.Session.GetInt32("UserId");
+            if (!userId.HasValue)
+                return Unauthorized(new { message = "You must be logged in" });
+
+            var participant = _data.Participants.FirstOrDefault(p => p.UserId == userId.Value);
+            if (participant == null)
+                return StatusCode(403, new { message = "Only participants can view their results" });
+
+            var enrolments = _data.Enrolments
+                .Where(e => e.ParticipantId == participant.ParticipantId)
+                .ToList();
+
+            var results = new List<object>();
+
+            foreach (var enrolment in enrolments)
+            {
+                var result = _data.Results.FirstOrDefault(r => r.EnrolmentId == enrolment.EnrolmentId);
+                if (result != null)
+                {
+                    var eventItem = _data.Events.FirstOrDefault(e => e.EventId == enrolment.EventId);
+                    var category = _data.Categories.FirstOrDefault(c => c.CategoryId == enrolment.CategoryId);
+                    results.Add(new
+                    {
+                        eventName = eventItem?.Name,
+                        eventDate = eventItem?.EventDate,
+                        categoryName = category?.Name,
+                        result.FinishTime,
+                        result.FinishPosition
+                    });
+                }
+            }
+
+            return Ok(results);
+        }
+
+        [HttpGet("~/api/events/{eventId}/results")]
+        public IActionResult GetEventResults(int eventId)
+        {
+            var eventItem = _data.Events.FirstOrDefault(e => e.EventId == eventId);
+            if (eventItem == null)
+                return NotFound(new { message = "Event not found" });
+
+            var enrolments = _data.Enrolments
+                .Where(e => e.EventId == eventId)
+                .ToList();
+
+            var results = new List<object>();
+
+            foreach (var enrolment in enrolments)
+            {
+                var result = _data.Results.FirstOrDefault(r => r.EnrolmentId == enrolment.EnrolmentId);
+                if (result != null)
+                {
+                    var participant = _data.Participants.FirstOrDefault(p => p.ParticipantId == enrolment.ParticipantId);
+
+                    results.Add(new
+                    {
+                        participantName = participant?.FullName,
+                        result.FinishTime,
+                        result.FinishPosition
+                    });
+                }
+            }
+
+            return Ok(results);
+        }
+
+        public class CreateResultRequest
+        {
+            public TimeSpan FinishTime { get; set; }
+            public int FinishPosition { get; set; }
+        }
+    }
+}
